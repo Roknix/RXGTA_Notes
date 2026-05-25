@@ -1,0 +1,7 @@
+.DS_Store
+.idea/
+.claude/
+.antigravitycli/
+webapp_pre_mysql_backup_2026-05-19/
+webapp/data/secret.php
+Kontext/
