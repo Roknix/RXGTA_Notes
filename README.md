@@ -87,3 +87,7 @@ The following third-party libraries are included in `webapp/assets/vendor/`:
 [MIT License](LICENSE) — Copyright (c) 2026 Roknix
 
 Use at your own risk. The software is provided "as is", without warranty of any kind.
+
+## Built with
+
+Developed with the assistance of [Claude Code](https://claude.com/claude-code) by Anthropic.
