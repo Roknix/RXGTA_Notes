@@ -4,76 +4,74 @@ require_once __DIR__ . '/includes/functions.php';
 
 startSecureSession();
 
-// Sprachschalter: ?lang=xx setzt das Cookie und redirected ohne Param, damit
-// Folge-Requests stabil bleiben. tryLocale() filtert über Whitelist — nur 'en'/'de'.
+// Sprachschalter analog index.php: ?lang=xx setzt Cookie und redirected ohne Param.
 if (isset($_GET['lang'])) {
     $chosen = tryLocale($_GET['lang']);
     if ($chosen !== null) setLocaleCookie($chosen);
-    header('Location: /');
+    header('Location: /register.php');
     exit;
 }
 
-// Aktive Session ODER gültiges Remember-Me-Cookie → direkt zum Dashboard.
+// Bereits angemeldet → kein Registrierungsformular nötig.
 if (tryAutoLogin()) {
     header('Location: /dashboard.php');
     exit;
 }
 
-$firstRun = isFirstRun();
+// Harte serverseitige Sperre: ist Selbstregistrierung aus, gibt es diese Seite nicht.
+// (Das Ausblenden der Links allein reicht nicht — der Endpoint muss selbst dichtmachen.)
+if (!isRegistrationVisible()) {
+    header('Location: /index.php');
+    exit;
+}
+
 $error    = '';
-$success  = '';
+$pending  = false; // true → Account angelegt, wartet auf Admin-Freigabe (approval-Modus)
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!hash_equals((string)($_SESSION['form_token'] ?? ''), $_POST['form_token'] ?? '')) {
         $error = __('login.form_token_invalid');
+    } elseif (trim((string)($_POST['website'] ?? '')) !== '') {
+        // Honeypot: dieses Feld ist für Menschen unsichtbar. Ist es ausgefüllt,
+        // war es mit hoher Wahrscheinlichkeit ein Bot → kommentarlos abweisen.
+        $error = __('register.error_generic');
     } else {
         $username = trim($_POST['username'] ?? '');
         $password = $_POST['password'] ?? '';
+        $confirm  = $_POST['password_confirm'] ?? '';
 
-        if ($firstRun) {
-            $confirm = $_POST['password_confirm'] ?? '';
-            if ($password !== $confirm) {
-                $error = __('login.passwords_mismatch');
-            } else {
-                $result = registerFirstAdmin($username, $password);
-                if ($result['success']) {
-                    // Bei der Erstinstallation darf der Admin direkt festlegen, ob/wie
-                    // Selbstregistrierung erlaubt ist. Wert strikt gegen die Whitelist
-                    // prüfen, bevor er gespeichert wird.
-                    $chosenMode = (string)($_POST['reg_mode'] ?? 'off');
-                    if (in_array($chosenMode, REGISTRATION_MODES, true) && $chosenMode !== 'off') {
-                        setSetting('registration_mode', $chosenMode);
-                    }
-                    header('Location: /dashboard.php');
-                    exit;
-                }
-                $error = $result['error'];
-            }
-        } else {
-            $remember = !empty($_POST['remember']);
-            $result = attemptLogin($username, $password, $remember);
-            if ($result['success']) {
+        $result = registerUser($username, $password, $confirm);
+        if ($result['success']) {
+            if (($result['mode'] ?? '') === 'open' && !empty($result['logged_in'])) {
                 header('Location: /dashboard.php');
                 exit;
             }
+            if (($result['mode'] ?? '') === 'open') {
+                // Account existiert, Auto-Login schlug unerwartet fehl → zur Anmeldung.
+                header('Location: /index.php');
+                exit;
+            }
+            // approval-Modus: Erfolgsseite mit Freigabe-Hinweis.
+            $pending = true;
+        } else {
             $error = $result['error'];
         }
     }
 }
 
-// Form CSRF token (different from session CSRF, used only for this login form)
+// Eigenes Form-Token für dieses Formular (wie index.php).
 if (empty($_SESSION['form_token'])) {
     $_SESSION['form_token'] = bin2hex(random_bytes(32));
 }
-$formToken = $_SESSION['form_token'];
-$loginLocale = resolveLocale();
+$formToken      = $_SESSION['form_token'];
+$registerLocale = resolveLocale();
 ?>
 <!DOCTYPE html>
-<html lang="<?= h($loginLocale) ?>">
+<html lang="<?= h($registerLocale) ?>">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= h($firstRun ? __('login.first_run.title') : __('login.title')) ?> · <?= h(APP_NAME) ?></title>
+    <title><?= h(__('register.title')) ?> · <?= h(APP_NAME) ?></title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -88,9 +86,13 @@ $loginLocale = resolveLocale();
             <p class="auth-subtitle"><?= h(__('login.tagline')) ?></p>
         </div>
 
-        <?php if ($firstRun): ?>
-        <div class="auth-badge"><?= h(__('login.first_run.badge')) ?></div>
-        <?php endif; ?>
+        <?php if ($pending): ?>
+        <div class="auth-badge"><?= h(__('register.success_title')) ?></div>
+        <div class="alert alert-success"><?= h(__('register.success_approval')) ?></div>
+        <a href="/index.php" class="btn btn-primary btn-full"><?= h(__('register.back_to_login')) ?></a>
+        <?php else: ?>
+
+        <div class="auth-badge"><?= h(__('register.badge')) ?></div>
 
         <?php if ($error): ?>
         <div class="alert alert-error"><?= h($error) ?></div>
@@ -98,6 +100,12 @@ $loginLocale = resolveLocale();
 
         <form method="post" autocomplete="off" novalidate>
             <input type="hidden" name="form_token" value="<?= h($formToken) ?>">
+
+            <?php /* Honeypot — für Menschen unsichtbar, nur Bots füllen es aus. */ ?>
+            <div aria-hidden="true" style="position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden">
+                <label for="website">Website</label>
+                <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
+            </div>
 
             <div class="form-group">
                 <label for="username"><?= h(__('login.username')) ?></label>
@@ -111,14 +119,14 @@ $loginLocale = resolveLocale();
                 <label for="password"><?= h(__('login.password')) ?></label>
                 <div class="password-wrap">
                     <input type="password" id="password" name="password" required
-                           minlength="<?= MIN_PASSWORD_LENGTH ?>"
-                           <?php if ($firstRun): ?>maxlength="<?= MAX_PASSWORD_LENGTH ?>" autocomplete="new-password" data-pw-policy data-pw-min="<?= MIN_PASSWORD_LENGTH ?>"<?php endif; ?>
+                           minlength="<?= MIN_PASSWORD_LENGTH ?>" maxlength="<?= MAX_PASSWORD_LENGTH ?>"
+                           autocomplete="new-password"
+                           data-pw-policy data-pw-min="<?= MIN_PASSWORD_LENGTH ?>"
                            placeholder="<?= h(__('login.password_ph')) ?>">
                     <button type="button" class="pw-toggle" data-toggle-pw="password" tabindex="-1" aria-label="<?= h(__('header.show_password')) ?>">
-                        <svg id="pw-eye" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                     </button>
                 </div>
-                <?php if ($firstRun): ?>
                 <ul class="pw-rules" data-pw-rules>
                     <li class="pw-rules-title"><?= h(__('pw.requirements')) ?></li>
                     <li data-rule="length"><?= h(__('login.min_chars', MIN_PASSWORD_LENGTH)) ?></li>
@@ -128,10 +136,8 @@ $loginLocale = resolveLocale();
                     <li data-rule="special"><?= h(__('pw.rule.special')) ?></li>
                     <li data-rule="match"><?= h(__('pw.rule.match')) ?></li>
                 </ul>
-                <?php endif; ?>
             </div>
 
-            <?php if ($firstRun): ?>
             <div class="form-group">
                 <label for="password_confirm"><?= h(__('login.password_confirm')) ?></label>
                 <div class="password-wrap">
@@ -145,41 +151,19 @@ $loginLocale = resolveLocale();
                 </div>
             </div>
 
-            <div class="form-group">
-                <label for="reg_mode"><?= h(__('login.first_run.reg_mode_label')) ?></label>
-                <select id="reg_mode" name="reg_mode">
-                    <option value="off" <?= ($_POST['reg_mode'] ?? 'off') === 'off' ? 'selected' : '' ?>><?= h(__('page.admin.reg_mode.off')) ?></option>
-                    <option value="open" <?= ($_POST['reg_mode'] ?? '') === 'open' ? 'selected' : '' ?>><?= h(__('page.admin.reg_mode.open')) ?></option>
-                    <option value="approval" <?= ($_POST['reg_mode'] ?? '') === 'approval' ? 'selected' : '' ?>><?= h(__('page.admin.reg_mode.approval')) ?></option>
-                </select>
-                <div class="form-hint"><?= h(__('login.first_run.reg_help')) ?></div>
-            </div>
-            <?php endif; ?>
-
-            <?php if (!$firstRun): ?>
-            <div class="form-group">
-                <label class="toggle-label">
-                    <input type="checkbox" name="remember" value="1" <?= !empty($_POST['remember']) ? 'checked' : '' ?>>
-                    <span class="toggle-text"><?= h(__('btn.sign_in_keep')) ?></span>
-                </label>
-            </div>
-            <?php endif; ?>
-
-            <button type="submit" class="btn btn-primary btn-full">
-                <?= h($firstRun ? __('login.first_run.submit') : __('btn.sign_in')) ?>
-            </button>
+            <button type="submit" class="btn btn-primary btn-full"><?= h(__('register.submit')) ?></button>
         </form>
 
-        <?php if (!$firstRun && isRegistrationVisible()): ?>
         <div style="text-align:center;margin-top:1.25rem;font-size:.9rem;color:var(--text-muted)">
-            <a href="/register.php" style="color:var(--accent-l)"><?= h(__('login.create_account')) ?></a>
+            <?= h(__('register.have_account')) ?>
+            <a href="/index.php" style="color:var(--accent-l)"><?= h(__('btn.sign_in')) ?></a>
         </div>
         <?php endif; ?>
 
         <div class="auth-lang-switch" style="text-align:center;margin-top:1.25rem;font-size:.85rem;color:var(--text-muted)">
-            <a href="?lang=de" style="color:inherit;<?= $loginLocale === 'de' ? 'font-weight:600;color:var(--accent-l)' : '' ?>">Deutsch</a>
+            <a href="?lang=de" style="color:inherit;<?= $registerLocale === 'de' ? 'font-weight:600;color:var(--accent-l)' : '' ?>">Deutsch</a>
             ·
-            <a href="?lang=en" style="color:inherit;<?= $loginLocale === 'en' ? 'font-weight:600;color:var(--accent-l)' : '' ?>">English</a>
+            <a href="?lang=en" style="color:inherit;<?= $registerLocale === 'en' ? 'font-weight:600;color:var(--accent-l)' : '' ?>">English</a>
         </div>
     </div>
 </div>
@@ -188,14 +172,11 @@ function togglePassword(fieldId) {
     const f = document.getElementById(fieldId);
     f.type = f.type === 'password' ? 'text' : 'password';
 }
-// Login-Seite lädt kein app.js → eigenständiger Click-Listener für data-toggle-pw.
 document.addEventListener('click', e => {
     const t = e.target.closest('[data-toggle-pw]');
     if (t) togglePassword(t.dataset.togglePw);
 });
 </script>
-<?php if ($firstRun): ?>
 <script src="/assets/auth.js"></script>
-<?php endif; ?>
 </body>
 </html>

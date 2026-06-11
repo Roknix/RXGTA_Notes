@@ -3,6 +3,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/functions.php';
 requireAdmin();
 $page = 'admin';
+$regMode = getRegistrationMode();
 require_once __DIR__ . '/includes/header.php';
 ?>
 <main class="main-content">
@@ -16,6 +17,21 @@ require_once __DIR__ . '/includes/header.php';
             <?= h(__('page.admin.add_user')) ?>
         </button>
     </div>
+
+    <section class="data-card" style="margin-bottom:1.25rem">
+        <h2 style="margin:0 0 .75rem 0;font-size:1.05rem"><?= h(__('page.admin.settings_title')) ?></h2>
+        <div class="form-group" style="max-width:440px;margin:0">
+            <label for="reg-mode-select"><?= h(__('page.admin.reg_mode_label')) ?></label>
+            <select id="reg-mode-select" data-change="save-reg-mode">
+                <option value="off" <?= $regMode === 'off' ? 'selected' : '' ?>><?= h(__('page.admin.reg_mode.off')) ?></option>
+                <option value="open" <?= $regMode === 'open' ? 'selected' : '' ?>><?= h(__('page.admin.reg_mode.open')) ?></option>
+                <option value="approval" <?= $regMode === 'approval' ? 'selected' : '' ?>><?= h(__('page.admin.reg_mode.approval')) ?></option>
+            </select>
+            <div class="form-hint"><?= h(__('page.admin.reg_mode_help')) ?></div>
+        </div>
+    </section>
+
+    <div id="pending-wrap"></div>
 
     <div id="users-table-wrap">
         <div class="loading-spinner"></div>
@@ -33,8 +49,12 @@ async function loadUsers() {
 }
 
 function renderUsers() {
+    const pending  = allUsers.filter(u => Number(u.is_approved) === 0);
+    const approved = allUsers.filter(u => Number(u.is_approved) !== 0);
+    renderPending(pending);
+
     const el = document.getElementById('users-table-wrap');
-    if (!allUsers.length) {
+    if (!approved.length) {
         el.innerHTML = `<div class="empty-state"><p>${esc(t('js.admin.empty'))}</p></div>`;
         return;
     }
@@ -53,7 +73,7 @@ function renderUsers() {
                 </tr>
             </thead>
             <tbody>
-                ${allUsers.map(u => `
+                ${approved.map(u => `
                 <tr class="${u.id == myId ? 'current-user-row' : ''}">
                     <td>#${u.id}</td>
                     <td>
@@ -89,6 +109,45 @@ function renderUsers() {
             </tbody>
         </table>
     </div>`;
+}
+
+function renderPending(pending) {
+    const el = document.getElementById('pending-wrap');
+    if (!pending.length) { el.innerHTML = ''; return; }
+    const loc = window.LOCALE === 'de' ? 'de-DE' : 'en-US';
+    el.innerHTML = `
+    <section class="data-card" style="margin-bottom:1.25rem">
+        <h2 style="margin:0 0 .75rem 0;font-size:1.05rem">
+            ${esc(t('page.admin.pending_title'))}
+            <span class="badge badge-warning">${pending.length}</span>
+        </h2>
+        <div class="table-wrap">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>${esc(t('js.admin.col_username'))}</th>
+                        <th>${esc(t('js.admin.pending.col_requested'))}</th>
+                        <th>${esc(t('js.admin.col_actions'))}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${pending.map(u => `
+                    <tr>
+                        <td>#${u.id}</td>
+                        <td><strong>${esc(u.username)}</strong></td>
+                        <td>${u.created_at ? new Date(u.created_at*1000).toLocaleDateString(loc) : '—'}</td>
+                        <td>
+                            <div class="card-actions">
+                                <button class="btn btn-sm btn-primary"     data-action="approve-user" data-id="${u.id}">${esc(t('js.admin.pending.approve'))}</button>
+                                <button class="btn btn-sm btn-danger-soft" data-action="reject-user"  data-id="${u.id}" data-username="${esc(u.username)}">${esc(t('js.admin.pending.reject'))}</button>
+                            </div>
+                        </td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>
+        </div>
+    </section>`;
 }
 
 function openCreateUserModal() {
@@ -176,6 +235,22 @@ async function deleteUser(userId, username) {
     catch(err) { toast(err.message, 'error'); }
 }
 
+async function saveRegMode(e) {
+    try { await api.post('/api/admin.php', { action: 'set_registration_mode', mode: e.target.value }); toast(t('js.admin.reg.saved')); }
+    catch(err) { toast(err.message, 'error'); }
+}
+
+async function approveUser(userId) {
+    try { await api.post('/api/admin.php', { action: 'approve_user', user_id: userId }); toast(t('js.admin.toast.approved')); loadUsers(); }
+    catch(err) { toast(err.message, 'error'); }
+}
+
+async function rejectUser(userId, username) {
+    if (!confirm(t('js.admin.confirm.reject', username))) return;
+    try { await api.delete('/api/admin.php', { action: 'delete_user', user_id: userId }); toast(t('js.admin.toast.user_deleted')); loadUsers(); }
+    catch(err) { toast(err.message, 'error'); }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     registerAction('open-create-user-modal', () => openCreateUserModal());
     registerAction('open-reset-pw-modal',    (e, el, ds) => openResetPwModal(parseInt(ds.id, 10), ds.username || ''));
@@ -185,6 +260,9 @@ document.addEventListener('DOMContentLoaded', () => {
     registerAction('delete-user',            (e, el, ds) => deleteUser(parseInt(ds.id, 10), ds.username || ''));
     registerAction('create-user',            (e) => createUser(e));
     registerAction('reset-password',         (e, el, ds) => resetPassword(e, parseInt(ds.id, 10)));
+    registerAction('save-reg-mode',          (e) => saveRegMode(e));
+    registerAction('approve-user',           (e, el, ds) => approveUser(parseInt(ds.id, 10)));
+    registerAction('reject-user',            (e, el, ds) => rejectUser(parseInt(ds.id, 10), ds.username || ''));
     loadUsers();
 });
 </script>

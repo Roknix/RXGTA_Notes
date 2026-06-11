@@ -13,8 +13,11 @@ try {
 
     if ($method === 'GET') {
         if ($action === 'users') {
-            $stmt = $db->query("SELECT id, username, is_admin, failed_attempts, locked_until, created_at FROM users ORDER BY id");
+            $stmt = $db->query("SELECT id, username, is_admin, is_approved, failed_attempts, locked_until, created_at FROM users ORDER BY id");
             jsonResponse($stmt->fetchAll());
+        }
+        if ($action === 'registration_mode') {
+            jsonResponse(['mode' => getRegistrationMode()]);
         }
         if ($action === 'characters') {
             $userId = (int)($_GET['user_id'] ?? 0);
@@ -90,6 +93,24 @@ try {
             $newAdmin = (int)$user['is_admin'] === 1 ? 0 : 1;
             $db->prepare("UPDATE users SET is_admin=? WHERE id=?")->execute([$newAdmin, $userId]);
             jsonResponse(['success' => true, 'is_admin' => $newAdmin]);
+            break;
+
+        case 'approve_user':
+            $userId = (int)($d['user_id'] ?? 0);
+            if ($userId <= 0) apiError('Ungültige Benutzer-ID');
+            $stmt = $db->prepare("SELECT id FROM users WHERE id=?");
+            $stmt->execute([$userId]);
+            if (!$stmt->fetch()) apiError('Benutzer nicht gefunden', 404);
+            $db->prepare("UPDATE users SET is_approved=1 WHERE id=?")->execute([$userId]);
+            jsonResponse(['success' => true]);
+            break;
+
+        case 'set_registration_mode':
+            $mode = (string)($d['mode'] ?? '');
+            // Strikte Whitelist — nie ungeprüft in die DB.
+            if (!in_array($mode, REGISTRATION_MODES, true)) apiError('Ungültiger Modus');
+            setSetting('registration_mode', $mode);
+            jsonResponse(['success' => true, 'mode' => $mode]);
             break;
 
         case 'delete_user':

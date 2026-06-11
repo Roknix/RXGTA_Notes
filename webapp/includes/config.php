@@ -45,6 +45,10 @@ define('REMEMBER_ME_COOKIE', 'rem');
 define('MAX_FAILED_ATTEMPTS', 5);
 define('LOCKOUT_SECONDS', 900); // 15 Minuten
 define('MIN_PASSWORD_LENGTH', 8);
+// Obergrenze gegen Resource-Exhaustion: password_hash(bcrypt) ignoriert zwar
+// alles ab 72 Byte, aber das Hashen eines megabytegroßen Strings kostet trotzdem
+// CPU. 128 ist großzügig für Passphrasen und unkritisch.
+define('MAX_PASSWORD_LENGTH', 128);
 
 // Per-IP Login-Drossel (ergänzt das per-User-Lockout). Etwas großzügiger,
 // damit getrennte legitime Nutzer hinter NAT/Carrier nicht gegenseitig sperren.

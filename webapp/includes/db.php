@@ -31,6 +31,7 @@ function initSchema(PDO $db): void {
             username          VARCHAR(64)   NOT NULL UNIQUE,
             password_hash     VARCHAR(255)  NOT NULL,
             is_admin          TINYINT(1)    NOT NULL DEFAULT 0,
+            is_approved       TINYINT(1)    NOT NULL DEFAULT 1,
             failed_attempts   INT UNSIGNED  NOT NULL DEFAULT 0,
             locked_until      BIGINT UNSIGNED NULL,
             last_character_id INT UNSIGNED  NULL,
@@ -304,6 +305,17 @@ function initSchema(PDO $db): void {
             locked_until    BIGINT UNSIGNED NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
+
+    // Globale App-Einstellungen als Key/Value. Aktuell genutzt für
+    // 'registration_mode' (off|open|approval). Werte sind immer Strings; die
+    // Interpretation/Whitelist passiert in den Helpern (getRegistrationMode()).
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS app_settings (
+            setting_key   VARCHAR(64)   PRIMARY KEY,
+            setting_value VARCHAR(255)  NOT NULL,
+            updated_at    BIGINT UNSIGNED NOT NULL DEFAULT 0
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
 }
 
 // ===== Migration System (MySQL) =====
@@ -376,6 +388,63 @@ function runMigrations(PDO $db): void {
             $db->exec("ALTER TABLE users ALTER COLUMN locale SET DEFAULT 'en'");
         }
     }
+
+    // ----------------------------------------------------------------------
+    // 2026-06-11 — Selbst-Registrierung: users.is_approved
+    // DEFAULT 1, damit bestehende User und admin-angelegte Accounts sofort
+    // freigeschaltet sind. Nur per Selbstregistrierung im 'approval'-Modus
+    // angelegte Accounts bekommen explizit 0 (gesperrt bis Admin-Freigabe).
+    addColIfMissing($db, 'users', 'is_approved', "TINYINT(1) NOT NULL DEFAULT 1");
+}
+
+// ===== Globale App-Einstellungen (app_settings) =====
+
+// Liefert den String-Wert einer Einstellung oder $default, wenn nicht gesetzt.
+// Per-Request-Cache, damit wiederholte Aufrufe (z.B. in Templates) nicht
+// erneut die DB anfragen. setSetting() hält den Cache konsistent.
+function &_settingsCache(): array {
+    static $cache = [];
+    return $cache;
+}
+
+function getSetting(string $key, ?string $default = null): ?string {
+    $cache = &_settingsCache();
+    if (array_key_exists($key, $cache)) return $cache[$key];
+    try {
+        $stmt = getDB()->prepare("SELECT setting_value FROM app_settings WHERE setting_key = ?");
+        $stmt->execute([$key]);
+        $val = $stmt->fetchColumn();
+        $cache[$key] = ($val === false) ? $default : (string)$val;
+    } catch (Throwable $e) {
+        $cache[$key] = $default;
+    }
+    return $cache[$key];
+}
+
+function setSetting(string $key, string $value): void {
+    getDB()->prepare(
+        "INSERT INTO app_settings (setting_key, setting_value, updated_at)
+         VALUES (?, ?, UNIX_TIMESTAMP())
+         ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = UNIX_TIMESTAMP()"
+    )->execute([$key, $value]);
+    $cache = &_settingsCache();
+    $cache[$key] = $value;
+}
+
+// Erlaubte Registrierungs-Modi. 'off' = aus (Default), 'open' = sofort nutzbar,
+// 'approval' = Account angelegt, aber gesperrt bis Admin-Freigabe.
+const REGISTRATION_MODES = ['off', 'open', 'approval'];
+
+// Liefert den aktuellen Modus, immer aus der Whitelist (unbekannte/leere Werte → 'off').
+function getRegistrationMode(): string {
+    $mode = (string)getSetting('registration_mode', 'off');
+    return in_array($mode, REGISTRATION_MODES, true) ? $mode : 'off';
+}
+
+// True, wenn Selbstregistrierung grundsätzlich angeboten wird (open ODER approval).
+// Steuert Sichtbarkeit von Links/Buttons UND den Zugang zu register.php.
+function isRegistrationVisible(): bool {
+    return getRegistrationMode() !== 'off';
 }
 
 function isFirstRun(): bool {
