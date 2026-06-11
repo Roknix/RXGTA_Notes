@@ -1,6 +1,10 @@
 <?php
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/db.php';
+// functions.php liefert passwordPolicyError() (genutzt in registerUser /
+// registerFirstAdmin). require_once ist idempotent — Aufrufer, die functions.php
+// ohnehin laden, sind unberührt.
+require_once __DIR__ . '/functions.php';
 
 function startSecureSession(): void {
     if (session_status() === PHP_SESSION_NONE) {
@@ -303,7 +307,7 @@ function requireAuth(): void {
 
     // User noch in DB vorhanden?
     try {
-        $stmt = getDB()->prepare("SELECT id, is_admin, session_epoch FROM users WHERE id = ?");
+        $stmt = getDB()->prepare("SELECT id, is_admin, is_approved, session_epoch FROM users WHERE id = ?");
         $stmt->execute([$userId]);
         $row = $stmt->fetch();
     } catch (Throwable $e) {
@@ -311,6 +315,15 @@ function requireAuth(): void {
     }
 
     if (!$row) {
+        session_unset();
+        session_destroy();
+        clearRememberCookie();
+        _redirectToLogin();
+    }
+
+    // Account zwischenzeitlich entzogen/gesperrt (Admin hat Freigabe zurückgenommen)
+    // → Session sofort kippen.
+    if ((int)$row['is_approved'] === 0) {
         session_unset();
         session_destroy();
         clearRememberCookie();
@@ -468,6 +481,14 @@ function attemptLogin(string $username, string $password, bool $remember = false
     // Erfolgreicher Login → IP-Counter dieser IP zurücksetzen.
     clearIpAttempts($ip);
 
+    // Selbstregistrierte Accounts im 'approval'-Modus sind bis zur Admin-Freigabe
+    // gesperrt. Erst NACH erfolgreicher Passwortprüfung melden, damit die Existenz
+    // eines (noch nicht freigegebenen) Accounts nicht über falsche Passwörter
+    // ausgelesen werden kann. Kein Session-Aufbau, kein Remember-Token.
+    if (isset($user['is_approved']) && (int)$user['is_approved'] === 0) {
+        return ['success' => false, 'error' => __('login.pending_approval')];
+    }
+
     session_regenerate_id(true);
     $_SESSION['user_id']       = (int)$user['id'];
     $_SESSION['username']      = $user['username'];
@@ -512,16 +533,81 @@ function registerFirstAdmin(string $username, string $password): array {
     if (!preg_match('/^[A-Za-z0-9._-]{3,64}$/', $username)) {
         return ['success' => false, 'error' => 'Benutzername darf nur Buchstaben, Ziffern, Punkt, Unter- und Bindestrich enthalten (3–64 Zeichen)'];
     }
-    if (strlen($password) < MIN_PASSWORD_LENGTH) {
-        return ['success' => false, 'error' => 'Passwort muss mindestens ' . MIN_PASSWORD_LENGTH . ' Zeichen haben'];
+    $pwErr = passwordPolicyError($password);
+    if ($pwErr !== null) {
+        return ['success' => false, 'error' => $pwErr];
     }
 
     $hash = hashPassword($password);
     $db   = getDB();
-    $db->prepare("INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 1, UNIX_TIMESTAMP())")
+    $db->prepare("INSERT INTO users (username, password_hash, is_admin, is_approved, created_at) VALUES (?, ?, 1, 1, UNIX_TIMESTAMP())")
         ->execute([$username, $hash]);
 
     return attemptLogin($username, $password);
+}
+
+// Selbstregistrierung eines normalen Nutzers (NIE Admin). Wird von register.php
+// aufgerufen. Liefert ['success'=>bool, 'error'=>?, 'mode'=>'open'|'approval'].
+//
+// Sicherheit:
+//   - Nur erlaubt, wenn getRegistrationMode() !== 'off' (serverseitig erzwungen).
+//   - is_admin fest 0 — Admin-Rechte gibt es ausschließlich über das Admin-Panel.
+//   - Eigene IP-Drossel (Key-Namespace "reg:"), unabhängig vom Login-Counter,
+//     damit Massen-Registrierung trotz Auto-Login-Reset gebremst wird.
+//   - Username-Whitelist identisch zu create_user / registerFirstAdmin.
+//   - Alle Inserts über Prepared Statements.
+function registerUser(string $username, string $password, string $passwordConfirm): array {
+    $mode = getRegistrationMode();
+    if ($mode === 'off') {
+        return ['success' => false, 'error' => __('register.disabled')];
+    }
+
+    // Eigener Throttle-Namespace, damit ein Login-Erfolg (der clearIpAttempts auf
+    // die nackte IP macht) den Registrierungs-Zähler NICHT zurücksetzt.
+    $ipKey     = 'reg:' . getClientIp();
+    $remaining = ipLockoutRemainingSeconds($ipKey);
+    if ($remaining > 0) {
+        $mins = (int)ceil($remaining / 60);
+        return ['success' => false, 'error' => __('register.ip_throttled', $mins)];
+    }
+    // Jeden ernsthaften Versuch zählen (Bots bremsen, auch bei Validierungsfehlern).
+    recordFailedIpAttempt($ipKey);
+
+    $username = trim($username);
+    if (!preg_match('/^[A-Za-z0-9._-]{3,64}$/', $username)) {
+        return ['success' => false, 'error' => __('register.username_invalid')];
+    }
+    $pwErr = passwordPolicyError($password);
+    if ($pwErr !== null) {
+        return ['success' => false, 'error' => $pwErr];
+    }
+    if ($password !== $passwordConfirm) {
+        return ['success' => false, 'error' => __('register.passwords_mismatch')];
+    }
+
+    $isApproved = ($mode === 'open') ? 1 : 0;
+    $hash       = hashPassword($password);
+    $db         = getDB();
+
+    try {
+        $db->prepare("INSERT INTO users (username, password_hash, is_admin, is_approved, created_at) VALUES (?, ?, 0, ?, UNIX_TIMESTAMP())")
+            ->execute([$username, $hash, $isApproved]);
+    } catch (PDOException $e) {
+        if ($e->getCode() === '23000') {
+            return ['success' => false, 'error' => __('register.username_taken')];
+        }
+        throw $e;
+    }
+
+    if ($mode === 'open') {
+        // Sofort nutzbar → direkt einloggen. attemptLogin nutzt die nackte IP,
+        // berührt den "reg:"-Throttle also nicht.
+        $login = attemptLogin($username, $password);
+        return ['success' => true, 'mode' => 'open', 'logged_in' => !empty($login['success'])];
+    }
+
+    // approval-Modus: Account liegt gesperrt vor, Admin muss freigeben.
+    return ['success' => true, 'mode' => 'approval'];
 }
 
 function logoutUser(): void {

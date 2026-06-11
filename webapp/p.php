@@ -113,6 +113,12 @@ $publicLocale = resolveLocale();
         .bio-body .toastui-editor-contents blockquote {
             border-left-color: var(--accent); color: var(--text-2);
         }
+        .public-register-cta {
+            display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem;
+            padding: .85rem 1.1rem; background: var(--card); border: 1px solid var(--border);
+            border-radius: var(--radius); margin-bottom: 1.25rem;
+        }
+        .public-register-cta span { color: var(--text-2); font-size: .9rem; }
         .public-footer { color: var(--text-muted); font-size: .78rem; text-align: center; margin-top: 2rem; }
         .public-footer a { color: var(--text-muted); }
         .not-found { text-align: center; padding: 4rem 1rem; color: var(--text-muted); }
@@ -121,6 +127,12 @@ $publicLocale = resolveLocale();
 </head>
 <body>
 <div class="public-wrap">
+<?php if (isRegistrationVisible()): ?>
+    <div class="public-register-cta">
+        <span><?= h(__('public.register_cta')) ?></span>
+        <a href="/register.php" class="btn btn-primary btn-sm"><?= h(__('public.register_btn')) ?></a>
+    </div>
+<?php endif; ?>
 <?php if (!$profile): ?>
     <div class="not-found">
         <h1><?= h(__('public.not_found_title')) ?></h1>

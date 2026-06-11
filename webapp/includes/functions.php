@@ -3,6 +3,24 @@ function h(string $s): string {
     return htmlspecialchars($s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
 }
 
+// Zentrale Passwort-Richtlinie für NEU gesetzte Passwörter (Selbstregistrierung,
+// Erst-Setup). Liefert null bei OK, sonst eine fertig übersetzte Fehlermeldung.
+// Bewusst NICHT auf Login angewandt — bestehende Accounts mit Alt-Passwörtern
+// sollen sich weiter anmelden können. Die Regex-Regeln müssen 1:1 zur clientseitigen
+// Prüfung in assets/auth.js passen.
+function passwordPolicyError(string $pw): ?string {
+    $len = strlen($pw);
+    if ($len < MIN_PASSWORD_LENGTH) return __('register.password_short', MIN_PASSWORD_LENGTH);
+    if ($len > MAX_PASSWORD_LENGTH) return __('pw.too_long', MAX_PASSWORD_LENGTH);
+    if (!preg_match('/[a-z]/', $pw)
+        || !preg_match('/[A-Z]/', $pw)
+        || !preg_match('/[0-9]/', $pw)
+        || !preg_match('/[^A-Za-z0-9]/', $pw)) {
+        return __('pw.policy', MIN_PASSWORD_LENGTH);
+    }
+    return null;
+}
+
 // $data type hint 'mixed' requires PHP 8.0 — removed for 7.4 compat
 function jsonResponse($data, int $code = 200): void {
     http_response_code($code);
